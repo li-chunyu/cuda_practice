@@ -66,6 +66,31 @@ __global__ void layer_norm_f32_kernel(float *x, float *out, float g, float b) {
     out[blockIdx.x * blockDim.x + threadIdx.x] = (val - avg) * rsqrtf(var + 1e-5f) * g + b;
 }
 
+template<int NUM_THREAD = 512>
+__global__ void rms_norm_f32_kernel(float* x, float* out, float gamma) {
+    constexpr int NUM_WRAP = (NUM_THREAD + WRAP_SIZE - 1) / WRAP_SIZE;
+    float val = x[blockDim.x * blockIdx.x + threadIdx.x];
+    int lane_id = threadIdx.x % WRAP_SIZE;
+    int wrap_id = threadIdx.x / WRAP_SIZE;
+    __shared__ float smem_reduce_sum[NUM_WRAP];
+    val = val * val;
+    val = wrap_reduce_sum(val);
+    if (lane_id == 0) {
+        smem_reduce_sum[wrap_id] = val;
+    }
+    __syncthreads();
+    if (wrap_id == 0) {
+        val = lane_id < NUM_WRAP ? smem_reduce_sum[lane_id]: 0.0f;
+        val = wrap_reduce_sum(val);
+        if (lane_id == 0) {
+            smem_reduce_sum[0] = val;
+        }
+    }
+    __syncthreads();
+    float rms_reverse = rsqrtf(__fdividef(smem_reduce_sum[0], NUM_THREAD));
+    out[blockDim.x * blockIdx.x + threadIdx.x] = x[blockDim.x * blockIdx.x + threadIdx.x] * rms_reverse;
+}
+
 void layer_norm_f32(torch::Tensor x, torch::Tensor out, float g, float b) {
   int row = x.size(0);
   int col = x.size(1);
